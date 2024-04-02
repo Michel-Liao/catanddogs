@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import datasets, transforms
 from pathlib import Path
 
@@ -47,7 +47,10 @@ class CatsAndDogsDataset(Dataset):
         else:
             return img, class_idx
 
+
 # DataLoader
+
+target_directory = './train'
 
 train_transforms = transforms.Compose([
     transforms.CenterCrop((227, 227)),
@@ -55,14 +58,26 @@ train_transforms = transforms.Compose([
     transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 ])
 
-train_dataset = CatsAndDogsDataset('./train', transform=train_transforms)
+dataset = CatsAndDogsDataset(target_directory, transform=train_transforms)
 
-train_dataloader = DataLoader(dataset=train_dataset, batch_size=4, shuffle=True)
+# Split sizes
+
+total_size = dataset.__len__()
+train_size = int(total_size * 0.8)
+validation_size = total_size - train_size
+
+# Split dataset
+train_dataset, validation_dataset = random_split(dataset, [train_size, validation_size])
+
+# Create dataloaders
+
+train_dataloader = DataLoader(dataset=train_dataset, batch_size=32, shuffle=True)
+validation_dataloader = DataLoader(dataset=validation_dataset, batch_size=32, shuffle=True)
 
 # Model
 
 class AlexNet(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self):
         super(AlexNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 96, kernel_size=11, stride=4, padding=2)
         self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
@@ -72,7 +87,7 @@ class AlexNet(nn.Module):
         self.conv5 = nn.Conv2d(384, 256, kernel_size=3, padding=1)
         self.fc1 = nn.Linear(256 * 6 * 6, 4096)
         self.fc2 = nn.Linear(4096, 4096)
-        self.fc3 = nn.Linear(4096, num_classes)
+        self.fc3 = nn.Linear(4096, 1)
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
@@ -88,10 +103,10 @@ class AlexNet(nn.Module):
 
         return x
     
-model = AlexNet(num_classes=2)
+model = AlexNet()
 model.to(device)
 
-loss_fn = torch.nn.BCELoss()
+loss_fn = torch.nn.BCEWithLogitsLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 def train_one_epoch(epoch_index, tb_writer):
@@ -120,8 +135,8 @@ def train_one_epoch(epoch_index, tb_writer):
 
         # Data for tensorboard
         running_loss += loss.item()
-        if i % 1000 == 999:
-            last_loss = running_loss / 1000 # loss per batch
+        if i % 100 == 99:
+            last_loss = running_loss / 100 # loss per batch
             print('  batch {} loss: {}'.format(i + 1, last_loss))
             tb_x = epoch_index * len(train_dataloader) + i + 1
             tb_writer.add_scalar('Loss/train', last_loss, tb_x)
@@ -129,12 +144,12 @@ def train_one_epoch(epoch_index, tb_writer):
     
     return last_loss
 
-# Initializing in a separate cell so we can easily add more epochs to the same run
+# Training loop
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-writer = SummaryWriter('runs/fashion_trainer_{}'.format(timestamp))
+writer = SummaryWriter('./runs/cats_and_dogs{}'.format(timestamp))
 epoch_number = 0
 
-EPOCHS = 5
+EPOCHS = 10
 
 best_vloss = 1_000_000.
 
@@ -153,9 +168,15 @@ for epoch in range(EPOCHS):
 
     # Disable gradient computation and reduce memory consumption.
     with torch.no_grad():
-        for i, vdata in enumerate(validation_loader):
+        for i, vdata in enumerate(validation_dataloader):
             vinputs, vlabels = vdata
+            vinputs, vlabels = vinputs.to(device), vlabels.to(device).float()
+
+            vlabels = vlabels.view(-1,1)
+
+            # Inference
             voutputs = model(vinputs)
+
             vloss = loss_fn(voutputs, vlabels)
             running_vloss += vloss
 
